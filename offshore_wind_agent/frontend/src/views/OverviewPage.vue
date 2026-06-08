@@ -1,12 +1,16 @@
 <script setup>
 import { computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useDashboard } from '../composables/useDashboard'
 import PowerChart from '../components/PowerChart.vue'
+
+const router = useRouter()
 
 const {
   currentSite, stationOverview, currentSiteId,
   rlComparison, topRiskWindows, summaryCards,
-  validationComparison, ensureDashboardLoaded, ensureSiteLoaded,
+  validationComparison, uploadList,
+  ensureDashboardLoaded, ensureSiteLoaded, loadUploadList,
   fmt, riskColor, riskTone,
 } = useDashboard()
 
@@ -20,14 +24,35 @@ const validationOverall = computed(() => ({
 }))
 const errorDist = computed(() => validationComparison.value?.error_distribution || {})
 
+function goToPredictions() {
+  router.push('/prediction')
+}
+function goToUploadSite(uploadId, siteId) {
+  router.push({ path: '/sites', query: { source: 'upload', uploadId, site: siteId } })
+}
+
 onMounted(async () => {
   await ensureDashboardLoaded()
+  await loadUploadList()
   if (currentSiteId.value) await ensureSiteLoaded(currentSiteId.value)
 })
 </script>
 
 <template>
   <div class="page-grid">
+    <!-- 上传数据指示条 -->
+    <section v-if="uploadList.length" class="page-panel wide-panel upload-indicator-bar">
+      <div class="upload-indicator-content">
+        <span style="font-weight:600;color:var(--amber)">已加载测试集</span>
+        <span v-for="u in uploadList.slice(0, 3)" :key="u.id" class="upload-indicator-item"
+          @click="goToPredictions()" style="cursor:pointer">
+          {{ u.original_filename?.slice(0, 35) }}{{ u.original_filename?.length > 35 ? '...' : '' }}
+          <small>({{ u.total_rows }}条, {{ u.sites?.length }}站点)</small>
+        </span>
+        <button class="mode-chip" @click="goToPredictions()">查看全部</button>
+      </div>
+    </section>
+
     <!-- 顶部指标 -->
     <section class="top-strip">
       <article v-for="card in summaryCards" :key="card.label" class="page-panel metric-tile">

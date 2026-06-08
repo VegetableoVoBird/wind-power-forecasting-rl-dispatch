@@ -825,6 +825,38 @@ class DQNNetwork(nn.Module):
         return self.net(x)
 
 
+class LegacyDQNNetwork(nn.Module):
+    """旧版 DQN 网络 (兼容旧训练产物): 3层 MLP + BatchNorm (hidden_dim=256)
+
+    旧架构 net 层索引:
+      net.0: Linear(input_dim, 256)
+      net.1: BatchNorm1d(256)
+      net.2: ReLU
+      net.3: Linear(256, 256)
+      net.4: BatchNorm1d(256)
+      net.5: ReLU
+      net.6: Linear(256, 4)
+    """
+
+    _LEGACY_HIDDEN = 256
+
+    def __init__(self, input_dim: int, output_dim: int = 4):
+        super().__init__()
+        h = self._LEGACY_HIDDEN
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, h),
+            nn.BatchNorm1d(h),
+            nn.ReLU(),
+            nn.Linear(h, h),
+            nn.BatchNorm1d(h),
+            nn.ReLU(),
+            nn.Linear(h, output_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class ReplayBuffer:
     """经验回放缓冲区 (Experience Replay Buffer)
 
@@ -993,17 +1025,47 @@ class DQNAgent:
             "num_sites": self.num_sites,
         }
 
+    @staticmethod
+    def _is_legacy_state(policy_net_state: dict) -> bool:
+        """通过检查参数名判断是否为旧版架构 (带 BatchNorm, hidden_dim=256)"""
+        return "net.6.weight" in policy_net_state
+
     @classmethod
     def from_state_dict(cls, state_dict: dict, device: str = "cpu") -> "DQNAgent":
-        """从序列化的参数恢复模型"""
+        """从序列化的参数恢复模型 (兼容新旧架构)"""
+        input_dim = state_dict["input_dim"]
+        num_sites = state_dict["num_sites"]
+        policy_state = state_dict["policy_net"]
+        tensor_state = {k: torch.from_numpy(v) for k, v in policy_state.items()}
+
+        if cls._is_legacy_state(policy_state):
+            # ---- 旧版架构: 3层 MLP + BatchNorm (hidden_dim=256) ----
+            agent = cls.__new__(cls)
+            agent.input_dim = input_dim
+            agent.num_sites = num_sites
+            agent.device = device
+            agent.policy_net = LegacyDQNNetwork(input_dim).to(device)
+            agent.target_net = LegacyDQNNetwork(input_dim).to(device)
+            # strict=False: 旧版序列化时未保存 BatchNorm 的 running_mean/running_var,
+            # 使用默认值 (running_mean=0, running_var=1) 对推理影响很小
+            agent.policy_net.load_state_dict(tensor_state, strict=False)
+            agent.target_net.load_state_dict(tensor_state, strict=False)
+            agent.target_net.eval()
+            agent.optimizer = optim.Adam(agent.policy_net.parameters(), lr=DQN_LR)
+            agent.replay_buffer = ReplayBuffer()
+            agent.loss_fn = nn.SmoothL1Loss()
+            agent.train_steps = 0
+            agent.total_reward_sum = 0.0
+            agent.total_reward_count = 0
+            return agent
+
+        # ---- 新版架构: 3层 MLP 无 BatchNorm (hidden_dim=128) ----
         agent = cls(
-            input_dim=state_dict["input_dim"],
-            num_sites=state_dict["num_sites"],
+            input_dim=input_dim,
+            num_sites=num_sites,
             device=device,
         )
-        agent.policy_net.load_state_dict(
-            {k: torch.from_numpy(v) for k, v in state_dict["policy_net"].items()}
-        )
+        agent.policy_net.load_state_dict(tensor_state)
         agent.sync_target_network()
         return agent
 

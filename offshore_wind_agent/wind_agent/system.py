@@ -8,11 +8,14 @@
   4. 构建前端 Dashboard 所需的完整数据载荷
   5. 规则问答 + Ollama LLM 问答
   6. 数据导出 (CSV + JSON)
+  7. 上传测试集管理与持久化
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -52,12 +55,14 @@ class OffshoreWindAgentSystem:
         self.raw_dir = self.project_root / "data" / "raw"
         self.artifact_dir = self.project_root / "artifacts"
         self.runs_dir = self.artifact_dir / "runs"
+        self.uploads_dir = self.artifact_dir / "uploads"
         self.best_run_marker = self.artifact_dir / "best_run.txt"
         self.version = "1.2.0"
 
         # 确保目录存在
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
 
         # 核心数据容器
         self.dataset_bundle: DatasetBundle | None = None
@@ -131,11 +136,21 @@ class OffshoreWindAgentSystem:
         return best_path
 
     def _load_best_or_fail(self) -> None:
-        """serve 模式: 加载最优训练结果, 没有则直接报错退出"""
+        """serve 模式: 加载最优训练结果, 没有则直接报错退出
+
+        优先使用 best_run.txt 指定的路径, 若不存在或无效则自动扫描全部 run 选最优。
+        """
         # 先尝试迁移旧版缓存
         self._migrate_legacy_bundle()
 
-        best_path = self._find_best_run()
+        # 优先读取 best_run.txt (允许手动指定)
+        best_path = self._load_from_marker()
+        if best_path is not None:
+            marker_name = best_path.parent.name
+        else:
+            # 回退: 自动扫描所有 run 选最优
+            best_path = self._find_best_run()
+            marker_name = None
 
         if best_path is None:
             msg = (
@@ -152,7 +167,41 @@ class OffshoreWindAgentSystem:
             )
 
         print(f"[System] 历史训练记录共 {len(list(self.runs_dir.glob('run_*/')))} 次")
-        self._load_from_run(best_path)
+        if marker_name:
+            print(f"[System] 使用 best_run.txt 指定结果: {marker_name}")
+
+        # 尝试加载, 若手动指定的 bundle 无法加载则回退到自动扫描
+        try:
+            self._load_from_run(best_path)
+        except Exception as exc:
+            if marker_name:
+                print(f"[System] 指定结果 {marker_name} 加载失败: {exc}")
+                fallback = self._find_best_run()
+                if fallback is not None and fallback != best_path:
+                    print(f"[System] 回退至自动扫描最优: {fallback.parent.name}")
+                    self._load_from_run(fallback)
+                else:
+                    raise
+            else:
+                raise
+
+    def _load_from_marker(self) -> Path | None:
+        """读取 best_run.txt 手动指定的 run 目录, 有效则返回 bundle 路径, 否则返回 None"""
+        if not self.best_run_marker.exists():
+            return None
+        try:
+            marker_text = self.best_run_marker.read_text(encoding="utf-8").strip()
+            if not marker_text:
+                return None
+            run_dir = Path(marker_text)
+            if not run_dir.is_absolute():
+                run_dir = self.project_root / run_dir
+            bundle_path = run_dir / "system_bundle.joblib"
+            if bundle_path.exists():
+                return bundle_path
+        except Exception:
+            pass
+        return None
 
     def _load_from_run(self, bundle_path: Path) -> None:
         """从指定的 bundle 文件加载系统状态
@@ -647,11 +696,12 @@ class OffshoreWindAgentSystem:
         # ---- 峰值窗口 (使用验证集实际功率) ----
         peak_window = validation_frame.loc[validation_frame["power_mw"].idxmax()]
 
-        # ---- RL 策略比较 ----
-        learned_row = next(
-            item for item in self.rl_bundle.comparison
-            if item["policy"] == "Q学习策略"
-        )
+        # ---- RL 策略比较 (优先 DQN, 不可用时回退 Q-Learning) ----
+        dqn_candidates = [item for item in self.rl_bundle.comparison if item["policy"] == "DQN学习策略"]
+        ql_candidates = [item for item in self.rl_bundle.comparison if item["policy"] == "Q学习策略"]
+        learned_row = dqn_candidates[0] if dqn_candidates else ql_candidates[0]
+        learned_label = "DQN" if dqn_candidates else "Q-Learning"
+
         aggressive_row = next(
             item for item in self.rl_bundle.comparison
             if item["policy"] == "始终积极并网"
@@ -686,7 +736,7 @@ class OffshoreWindAgentSystem:
                 "label": "强化学习相对激进策略增益",
                 "value": f"{self._float(reward_gain, 2)} 奖励分",
                 "note": (
-                    "Q-Learning 学习到的调度策略相比始终积极并网基线策略的累计奖励提升。"
+                    f"{learned_label} 学习到的调度策略相比始终积极并网基线策略的累计奖励提升。"
                     "正值表示学习策略在收益与安全性之间取得了更好的平衡。"
                 ),
             },
@@ -695,8 +745,8 @@ class OffshoreWindAgentSystem:
                 "value": f"{self._float(incident_drop * 100.0, 2)}%",
                 "note": (
                     f"相比激进并网策略（事故率 {self._float(aggressive_row['incident_rate']*100, 2)}%），"
-                    f"Q-Learning 策略将事故率降至 {self._float(learned_row['incident_rate']*100, 2)}%，"
-                    f"在维持收益竞争力的同时显著提升了系统安全性。"
+                    f"{learned_label} 策略将事故率降至 {self._float(learned_row['incident_rate']*100, 2)}%，"
+                    "在维持收益竞争力的同时显著提升了系统安全性。"
                 ),
             },
         ]
@@ -1274,7 +1324,7 @@ class OffshoreWindAgentSystem:
         """
         from io import StringIO
         from .data_utils import engineer_features, read_csv_with_fallback
-        from .forecasting import compute_risk, _prepare_matrix, _add_site_columns
+        from .forecasting import compute_risk, _prepare_matrix
         from .rl_control import pick_action
 
         assert self.forecast_bundle is not None
@@ -1360,9 +1410,25 @@ class OffshoreWindAgentSystem:
         site_ids = self.forecast_bundle.site_ids
         df = engineer_features(df, site_ids)
 
-        # 6. 预测
-        feature_cols = _add_site_columns(df, site_ids)
-        feature_cols = [c for c in feature_cols if c in df.columns]
+        # 6. 预测 — 使用训练时保存的特征列 (而非当前 FEATURE_COLUMNS)
+        #    确保模型输入与训练时完全一致, 兼容新旧版本的 FEATURE_COLUMNS 变化
+        feature_cols = [c for c in self.forecast_bundle.feature_columns if c in df.columns]
+
+        # 诊断日志: 特征匹配检查
+        model_expected = set(self.forecast_bundle.model.feature_names_in_)
+        actual_input = set(feature_cols)
+        extra = actual_input - model_expected
+        missing = model_expected - actual_input
+        if extra or missing:
+            print(f"[PredictUpload] 特征不匹配! run={self.run_info.get('run_name')}", flush=True)
+            print(f"[PredictUpload] model期望={len(model_expected)}列, 实际输入={len(actual_input)}列", flush=True)
+            if extra:
+                print(f"[PredictUpload] 多余特征: {extra}", flush=True)
+            if missing:
+                print(f"[PredictUpload] 缺失特征: {missing}", flush=True)
+        else:
+            print(f"[PredictUpload] 特征匹配OK: {len(feature_cols)}列, run={self.run_info.get('run_name')}", flush=True)
+
         x = _prepare_matrix(df, feature_cols, self.forecast_bundle.feature_medians)
 
         if self.forecast_bundle.lgbm_model is not None and self.forecast_bundle.model_type != "histgb":
@@ -1452,3 +1518,248 @@ class OffshoreWindAgentSystem:
         buffer.write(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
         buffer.seek(0)
         return buffer
+
+    # ========================================================================
+    # 上传测试集管理 (持久化, 跨页面共享, 刷新不丢失)
+    # ========================================================================
+
+    _MAX_UPLOADS = 5
+
+    def save_upload(self, csv_buffer: BytesIO, original_filename: str) -> dict[str, Any]:
+        """保存预测结果到磁盘, 返回 upload 元信息
+
+        流程: predict_on_upload 已生成预测 CSV → 保存到 artifacts/uploads/<id>/
+        """
+        upload_id = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        upload_dir = self.uploads_dir / upload_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # 保存预测 CSV
+        csv_buffer.seek(0)
+        pred_path = upload_dir / "predictions.csv"
+        pred_path.write_bytes(csv_buffer.read())
+
+        # 解析 CSV 提取元信息
+        csv_buffer.seek(0)
+        df = pd.read_csv(csv_buffer)
+
+        # 站点列表 (场站编号列)
+        site_col = "场站编号" if "场站编号" in df.columns else df.columns[0]
+        sites = sorted(df[site_col].unique().tolist())
+
+        # 预测功率列
+        power_col = next((c for c in df.columns if "功率" in c and "MW" in c), df.columns[2])
+
+        meta = {
+            "id": upload_id,
+            "original_filename": original_filename,
+            "created_at": datetime.now().isoformat(),
+            "total_rows": len(df),
+            "sites": sites,
+            "columns": list(df.columns),
+            "pred_power_min": float(df[power_col].min()),
+            "pred_power_max": float(df[power_col].max()),
+        }
+        (upload_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # 清理超出上限的旧上传
+        self._prune_old_uploads()
+
+        return meta
+
+    def _prune_old_uploads(self) -> None:
+        """保留最近 _MAX_UPLOADS 次上传, 删除多余的"""
+        all_uploads = sorted(
+            self.uploads_dir.glob("upload_*"),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        for old_dir in all_uploads[self._MAX_UPLOADS:]:
+            shutil.rmtree(old_dir, ignore_errors=True)
+
+    def list_uploads(self) -> list[dict[str, Any]]:
+        """列出所有已保存的上传记录 (按时间倒序)"""
+        results = []
+        for upload_dir in sorted(
+            self.uploads_dir.glob("upload_*"),
+            key=lambda p: p.name,
+            reverse=True,
+        ):
+            meta_path = upload_dir / "meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    results.append(meta)
+                except Exception:
+                    continue
+        return results
+
+    def get_upload_detail(self, upload_id: str) -> dict[str, Any] | None:
+        """获取单次上传的详情 (含前200行预览数据)"""
+        upload_dir = self.uploads_dir / upload_id
+        meta_path = upload_dir / "meta.json"
+        pred_path = upload_dir / "predictions.csv"
+        if not meta_path.exists() or not pred_path.exists():
+            return None
+
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        df = pd.read_csv(str(pred_path))
+        # 按站点分组统计
+        site_stats = []
+        site_col = "场站编号" if "场站编号" in df.columns else df.columns[0]
+        power_col = next((c for c in df.columns if "功率" in c and "MW" in c), df.columns[2])
+        for site_id, g in df.groupby(site_col):
+            site_stats.append({
+                "site_id": site_id,
+                "row_count": len(g),
+                "pred_avg_mw": round(float(g[power_col].mean()), 2),
+                "pred_peak_mw": round(float(g[power_col].max()), 2),
+            })
+
+        # 前200行预览 (每个站点取前40行)
+        preview_rows = []
+        for site_id in meta.get("sites", []):
+            site_df = df[df[site_col] == site_id].head(40)
+            preview_rows.extend(site_df.values.tolist())
+
+        return {
+            **meta,
+            "site_stats": site_stats,
+            "columns": list(df.columns),
+            "preview_rows": preview_rows[:200],
+        }
+
+    def get_upload_site_data(self, upload_id: str, site_id: str) -> dict[str, Any] | None:
+        """获取上传数据中指定站点的完整时序数据 (站点驾驶舱用)"""
+        upload_dir = self.uploads_dir / upload_id
+        meta_path = upload_dir / "meta.json"
+        pred_path = upload_dir / "predictions.csv"
+        if not meta_path.exists() or not pred_path.exists():
+            return None
+
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        df = pd.read_csv(str(pred_path))
+
+        site_col = "场站编号" if "场站编号" in df.columns else df.columns[0]
+        time_col = "时间" if "时间" in df.columns else df.columns[1]
+        power_col = next((c for c in df.columns if "功率" in c and "MW" in c), df.columns[2])
+        risk_col = next((c for c in df.columns if "风险" in c), None)
+        action_col = next((c for c in df.columns if "策略" in c), None)
+        dispatch_col = next((c for c in df.columns if "调度" in c and "MW" in c), None)
+
+        if site_id not in df[site_col].values:
+            return None
+
+        site_df = df[df[site_col] == site_id].copy()
+        site_df["_ts"] = pd.to_datetime(site_df[time_col])
+        site_df = site_df.sort_values("_ts").reset_index(drop=True)
+
+        # ---- 时序图数据 (仅预测, 无实际对比) ----
+        forecast_series = []
+        for _, row in site_df.iterrows():
+            pt = {
+                "timestamp": row["_ts"].strftime("%m-%d %H:%M"),
+                "predicted_power_mw": round(float(row[power_col]), 3),
+            }
+            if risk_col and risk_col in row:
+                pt["risk_score"] = round(float(row[risk_col]), 3)
+            if action_col and action_col in row:
+                pt["action_label"] = str(row[action_col])
+            if dispatch_col and dispatch_col in row:
+                pt["dispatch_power_mw"] = round(float(row[dispatch_col]), 3)
+            forecast_series.append(pt)
+
+        # ---- 日汇总 (仅预测值) ----
+        site_df["_date"] = site_df["_ts"].dt.strftime("%Y-%m-%d")
+        daily = (
+            site_df.groupby("_date")
+            .agg(
+                predicted_avg=(power_col, "mean"),
+                predicted_peak=(power_col, "max"),
+                predicted_energy=(power_col, "sum"),
+            )
+            .reset_index()
+        )
+        if risk_col:
+            daily_risk = site_df.groupby("_date")[risk_col].mean().reset_index()
+            daily = daily.merge(daily_risk.rename(columns={risk_col: "avg_risk"}), on="_date", how="left")
+        else:
+            daily["avg_risk"] = 0.0
+
+        # 每日策略分布
+        daily_actions = []
+        if action_col:
+            for date, day_df in site_df.groupby("_date"):
+                action_counts = day_df[action_col].value_counts().to_dict()
+                daily_actions.append({"date": date, "actions": action_counts})
+
+        # 风险带
+        risk_band = []
+        if risk_col:
+            for _, row in site_df.iterrows():
+                risk_band.append({
+                    "timestamp": row["_ts"].strftime("%m-%d %H:%M"),
+                    "risk_score": round(float(row[risk_col]), 3),
+                    "action_label": str(row[action_col]) if action_col and action_col in row else "平衡调度",
+                })
+
+        # 高风险窗口 Top 10
+        top_windows = []
+        if risk_col:
+            top = site_df.sort_values(risk_col, ascending=False).head(10)
+            for _, row in top.iterrows():
+                win = {
+                    "timestamp": row["_ts"].strftime("%Y-%m-%d %H:%M"),
+                    "risk_score": round(float(row[risk_col]), 3),
+                    "predicted_power_mw": round(float(row[power_col]), 3),
+                }
+                if action_col and action_col in row:
+                    win["action_label"] = str(row[action_col])
+                top_windows.append(win)
+
+        # 容量估算 (用预测功率峰值)
+        cap_est = round(float(site_df[power_col].max()) * 1.05, 0)
+        try:
+            site_info = self.dataset_bundle.site_info
+            site_row = site_info[site_info["site_id"] == site_id]
+            if len(site_row) > 0:
+                cap_est = round(float(site_row["capacity_mw"].iloc[0]), 2)
+        except Exception:
+            pass
+
+        return {
+            "site_id": site_id,
+            "capacity_mw": cap_est,
+            "data_source": f"上传测试集 ({meta['original_filename']})",
+            "upload_id": upload_id,
+            "avg_risk": round(float(site_df[risk_col].mean()), 3) if risk_col else 0,
+            "dominant_action": (
+                site_df[action_col].mode().iloc[0]
+                if action_col and len(site_df[action_col].mode()) > 0
+                else "平衡调度"
+            ),
+            "forecast_series": forecast_series,
+            "risk_band": risk_band,
+            "daily_summary": [
+                {
+                    "date": row["_date"],
+                    "predicted_avg": round(float(row["predicted_avg"]), 3),
+                    "predicted_peak": round(float(row["predicted_peak"]), 3),
+                    "avg_risk": round(float(row.get("avg_risk", 0)), 3),
+                    "total_predicted_mwh": round(float(row["predicted_energy"]) * 0.25, 1),
+                }
+                for _, row in daily.iterrows()
+            ],
+            "daily_actions": daily_actions,
+            "top_windows": top_windows,
+        }
+
+    def delete_upload(self, upload_id: str) -> bool:
+        """删除指定上传记录"""
+        upload_dir = self.uploads_dir / upload_id
+        if upload_dir.exists():
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            return True
+        return False

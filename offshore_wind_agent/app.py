@@ -163,7 +163,16 @@ def upload_predict():
             resp["rmse_mw"] = round(float(np.sqrt(((actual - predicted) ** 2).mean())), 3)
         return jsonify(resp)
     except Exception as e:
-        return jsonify({"error": f"预测失败: {str(e)}"}), 500
+        import traceback
+        err_detail = traceback.format_exc()
+        print(f"[Upload Error] {err_detail}", flush=True)
+        return jsonify({
+            "error": f"预测失败: {str(e)}",
+            "debug": {
+                "loaded_run": system.run_info.get("run_name", "unknown"),
+                "model_features": len(system.forecast_bundle.model.feature_names_in_) if system.forecast_bundle else "N/A",
+            }
+        }), 500
 
 
 @app.route("/api/upload/predict/download", methods=["POST"])
@@ -200,6 +209,82 @@ def download_template():
         download_name="test_template.csv",
         mimetype="text/csv",
     )
+
+
+@app.route("/api/debug/info")
+def debug_info():
+    """诊断端点: 返回当前加载的模型信息"""
+    fb = system.forecast_bundle
+    model_feats = list(fb.model.feature_names_in_) if fb else []
+    return jsonify({
+        "loaded_run": system.run_info.get("run_name", "unknown"),
+        "model_type": type(fb.model).__name__ if fb else "N/A",
+        "model_features_count": len(model_feats),
+        "model_features": model_feats,
+        "bundle_features_count": len(fb.feature_columns) if fb else 0,
+        "dqn_agent_loaded": system.dqn_agent is not None,
+        "rl_comparison": system.summary_payload.get("rl_algorithm_comparison", {}).get("comparison", {}) if system.summary_payload else {},
+    })
+
+
+# ============================================================================
+# 上传测试集管理 API (持久化, 跨页面共享)
+# ============================================================================
+
+@app.route("/api/upload/save", methods=["POST"])
+def upload_save():
+    """保存预测结果到磁盘 (在 upload/predict 之后调用)
+
+    请求: JSON { csv_content: "...", original_filename: "..." }
+    返回: JSON 元信息 { id, original_filename, sites, total_rows, ... }
+    """
+    payload = request.get_json(silent=True) or {}
+    csv_content = payload.get("csv_content", "")
+    original_filename = payload.get("original_filename", "unknown.csv")
+
+    if not csv_content:
+        return jsonify({"error": "缺少 csv_content"}), 400
+
+    try:
+        from io import BytesIO
+        buf = BytesIO(csv_content.encode("utf-8-sig"))
+        meta = system.save_upload(buf, original_filename)
+        return jsonify(meta)
+    except Exception as e:
+        return jsonify({"error": f"保存失败: {str(e)}"}), 500
+
+
+@app.route("/api/uploads")
+def list_uploads():
+    """列出所有已保存的上传记录 (按时间倒序)"""
+    return jsonify(system.list_uploads())
+
+
+@app.route("/api/uploads/<upload_id>")
+def upload_detail(upload_id: str):
+    """获取单次上传的详情 (含前200行预览)"""
+    detail = system.get_upload_detail(upload_id)
+    if detail is None:
+        return jsonify({"error": "上传记录不存在"}), 404
+    return jsonify(detail)
+
+
+@app.route("/api/uploads/<upload_id>/site/<site_id>")
+def upload_site_data(upload_id: str, site_id: str):
+    """获取上传数据中指定站点的完整时序数据"""
+    data = system.get_upload_site_data(upload_id, site_id)
+    if data is None:
+        return jsonify({"error": "上传记录或站点不存在"}), 404
+    return jsonify(data)
+
+
+@app.route("/api/uploads/<upload_id>", methods=["DELETE"])
+def delete_upload(upload_id: str):
+    """删除指定上传记录"""
+    ok = system.delete_upload(upload_id)
+    if not ok:
+        return jsonify({"error": "上传记录不存在"}), 404
+    return jsonify({"deleted": upload_id})
 
 
 @app.route("/api/export/forecast.csv")

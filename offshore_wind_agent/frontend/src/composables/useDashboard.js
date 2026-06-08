@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { askAgent, fetchDashboard, fetchSite, getExportUrl } from '../services/agentApi'
+import { askAgent, fetchDashboard, fetchSite, getExportUrl, saveUpload, listUploads, getUploadDetail, getUploadSiteData, deleteUpload } from '../services/agentApi'
 
 const dashboard = ref(null)
 const siteMap = ref({})
@@ -10,6 +10,14 @@ const asking = ref(false)
 const errorMessage = ref('')
 const answer = ref('等待提问...')
 const answerMeta = ref('')
+
+// ---- 上传测试集状态 ----
+const uploadList = ref([])
+const currentUploadId = ref(null)
+const currentUpload = ref(null)
+const uploadSiteDataCache = ref({})   // key: "<uploadId>/<siteId>"
+const uploading = ref(false)
+const uploadResult = ref(null)        // 刚上传完成的结果 (含 columns + rows)
 
 let dashboardPromise = null
 
@@ -135,6 +143,66 @@ async function submitQuestion(question) {
   }
 }
 
+// ---- 上传测试集操作方法 ----
+
+async function loadUploadList() {
+  try {
+    uploadList.value = await listUploads()
+  } catch (e) {
+    console.error('loadUploadList failed:', e)
+  }
+}
+
+async function loadUploadDetail(uploadId) {
+  currentUploadId.value = uploadId
+  try {
+    currentUpload.value = await getUploadDetail(uploadId)
+  } catch (e) {
+    console.error('loadUploadDetail failed:', e)
+    currentUpload.value = null
+  }
+}
+
+async function loadUploadSiteData(uploadId, siteId) {
+  const key = `${uploadId}/${siteId}`
+  if (uploadSiteDataCache.value[key]) return uploadSiteDataCache.value[key]
+  try {
+    const data = await getUploadSiteData(uploadId, siteId)
+    uploadSiteDataCache.value = { ...uploadSiteDataCache.value, [key]: data }
+    return data
+  } catch (e) {
+    console.error('loadUploadSiteData failed:', e)
+    return null
+  }
+}
+
+async function saveCurrentUpload(csvContent, originalFilename) {
+  uploading.value = true
+  try {
+    const meta = await saveUpload(csvContent, originalFilename)
+    await loadUploadList()
+    return meta
+  } catch (e) {
+    console.error('saveUpload failed:', e)
+    throw e
+  } finally {
+    uploading.value = false
+  }
+}
+
+async function removeUpload(uploadId) {
+  try {
+    await deleteUpload(uploadId)
+    await loadUploadList()
+    if (currentUploadId.value === uploadId) {
+      currentUploadId.value = null
+      currentUpload.value = null
+    }
+  } catch (e) {
+    console.error('removeUpload failed:', e)
+  }
+}
+
 export function useDashboard() {
   return {
     dashboard,
@@ -172,5 +240,17 @@ export function useDashboard() {
     ensureDashboardLoaded,
     ensureSiteLoaded,
     submitQuestion,
+    // upload
+    uploadList,
+    currentUploadId,
+    currentUpload,
+    uploadSiteDataCache,
+    uploading,
+    uploadResult,
+    loadUploadList,
+    loadUploadDetail,
+    loadUploadSiteData,
+    saveCurrentUpload,
+    removeUpload,
   }
 }

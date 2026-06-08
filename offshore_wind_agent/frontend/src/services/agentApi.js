@@ -42,3 +42,29 @@ export function fetchComparison() {
 export function getExportUrl(path) {
   return buildApiUrl(path)
 }
+
+// ---- 上传测试集管理 ----
+
+export function saveUpload(csvContent, originalFilename) {
+  return readJson('/upload/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ csv_content: csvContent, original_filename: originalFilename }),
+  })
+}
+
+export function listUploads() {
+  return readJson('/uploads')
+}
+
+export function getUploadDetail(uploadId) {
+  return readJson(`/uploads/${uploadId}`)
+}
+
+export function getUploadSiteData(uploadId, siteId) {
+  return readJson(`/uploads/${uploadId}/site/${siteId}`)
+}
+
+export function deleteUpload(uploadId) {
+  return readJson(`/uploads/${uploadId}`, { method: 'DELETE' })
+}
