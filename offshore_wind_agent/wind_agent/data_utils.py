@@ -266,7 +266,26 @@ def engineer_features(frame: pd.DataFrame, site_ids: Iterable[str]) -> pd.DataFr
     _diff_feature(df, "humidity", "humidity_ramp")       # 湿度变化
     df["wind_ramp_abs"] = df["wind_ramp"].abs()           # 风速突变幅度 (方向无关)
 
-    # ---- 6. 站点独热编码 ----
+    # ---- 6. 滞后功率特征 (核心精度提升点, 需power_ratio列) ----
+    if "power_ratio" in df.columns:
+        for lag in [1, 4, 8, 24]:
+            col_name = f"power_ratio_lag{lag}"
+            df[col_name] = df.groupby("site_id")["power_ratio"].shift(lag)
+            df[col_name] = df[col_name].fillna(0.0)      # 边界处填0
+
+    # ---- 7. 风功率密度与湍流强度 ----
+    if "air_density" in df.columns:
+        df["wind_power_density"] = 0.5 * df["air_density"] * (df["wind100_speed"] ** 3)
+    for window in [4, 12]:
+        roll_mean = df.groupby("site_id")["wind100_speed"].transform(
+            lambda x: x.rolling(window, min_periods=1).mean()
+        )
+        roll_std = df.groupby("site_id")["wind100_speed"].transform(
+            lambda x: x.rolling(window, min_periods=1).std()
+        )
+        df[f"turbulence_{window}"] = roll_std / (roll_mean + 1e-6)
+
+    # ---- 8. 站点独热编码 ----
     for site_id in site_ids:
         df[f"site_{site_id}"] = (df["site_id"] == site_id).astype(float)
 

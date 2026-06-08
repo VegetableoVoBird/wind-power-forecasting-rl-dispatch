@@ -75,6 +75,15 @@ FEATURE_COLUMNS = [
     "wind_ramp",             # 风速一阶差分
     "humidity_ramp",         # 湿度一阶差分
     "wind_ramp_abs",         # 风速变化的绝对值
+    # ---- 滞后功率特征 (核心精度提升点) ----
+    "power_ratio_lag1",      # 15分钟前功率比
+    "power_ratio_lag4",      # 1小时前功率比
+    "power_ratio_lag8",      # 2小时前功率比
+    "power_ratio_lag24",     # 6小时前功率比
+    # ---- 物理扩展特征 ----
+    "wind_power_density",    # 风功率密度 (0.5ρv³)
+    "turbulence_4",          # 1小时湍流强度
+    "turbulence_12",         # 3小时湍流强度
 ]
 
 # 模型类型常量
@@ -83,8 +92,8 @@ MODEL_TYPE_LGBM = "lgbm"       # LightGBM
 MODEL_TYPE_BOTH = "both"       # 两者都跑, 用于对比实验
 
 # 训练数据采样上限 (控制训练时间)
-MAX_TRAIN_ROWS = 90000
-MAX_FINAL_ROWS = 120000
+MAX_TRAIN_ROWS = 150000
+MAX_FINAL_ROWS = 200000
 
 
 @dataclass
@@ -122,15 +131,18 @@ class ForecastBundle:
 
 def _prepare_matrix(frame: pd.DataFrame, feature_columns: list[str], medians: dict[str, float]) -> pd.DataFrame:
     """准备特征矩阵, 用中位数填充缺失值"""
-    x = frame[feature_columns].copy()
+    available = [c for c in feature_columns if c in frame.columns]
+    x = frame[available].copy()
     for column, value in medians.items():
-        x[column] = x[column].fillna(value)
+        if column in x.columns:
+            x[column] = x[column].fillna(value)
     return x
 
 
 def _add_site_columns(frame: pd.DataFrame, site_ids: list[str]) -> list[str]:
-    """将站点独热编码列名追加到特征列表"""
-    return FEATURE_COLUMNS + [f"site_{site_id}" for site_id in site_ids]
+    """将站点独热编码列名追加到特征列表，并去掉数据中不存在的列（如滞后特征在测试集中不存在）"""
+    base = FEATURE_COLUMNS + [f"site_{site_id}" for site_id in site_ids]
+    return [c for c in base if c in frame.columns]
 
 
 # ============================================================================
@@ -144,11 +156,11 @@ def _fit_model_histgb(x_train: pd.DataFrame, y_train: pd.Series) -> HistGradient
     不需要手动填充 NaN, 对大数据集速度优于传统 GBDT。
     """
     model = HistGradientBoostingRegressor(
-        learning_rate=0.08,      # 学习率, 较小的值使每棵树贡献更平滑
-        max_depth=6,             # 树的最大深度, 控制模型复杂度
-        max_iter=90,             # 提升迭代次数 (树的数量)
-        min_samples_leaf=40,     # 叶子节点最小样本数, 防过拟合
-        l2_regularization=0.05,  # L2 正则化系数
+        learning_rate=0.05,      # 学习率
+        max_depth=8,             # 树的最大深度
+        max_iter=200,            # 提升迭代次数
+        min_samples_leaf=20,     # 叶子节点最小样本数
+        l2_regularization=0.01,  # L2 正则化系数
         random_state=42,
     )
     model.fit(x_train, y_train)
@@ -172,21 +184,21 @@ def _fit_model_lgb(x_train: pd.DataFrame, y_train: pd.Series) -> Any:
 
     # LightGBM 核心参数
     params = {
-        "objective": "regression",          # 回归任务
-        "metric": "mae",                    # 验证指标: 平均绝对误差
-        "boosting_type": "gbdt",            # 梯度提升决策树
-        "learning_rate": 0.08,              # 学习率 (与 HistGBR 保持一致)
-        "max_depth": 6,                     # 最大深度
-        "num_leaves": 48,                   # 叶子数 (~2^max_depth 附近)
-        "min_data_in_leaf": 40,             # 叶子最小样本数
-        "lambda_l2": 0.05,                  # L2 正则化
-        "feature_fraction": 0.85,           # 每棵树随机选 85% 特征 (防过拟合)
-        "bagging_fraction": 0.85,           # 每棵树随机选 85% 样本
-        "bagging_freq": 1,                  # 每次迭代都重新采样
-        "num_iterations": 90,               # 迭代次数
-        "verbose": -1,                      # 静默训练
+        "objective": "regression",
+        "metric": "mae",
+        "boosting_type": "gbdt",
+        "learning_rate": 0.03,
+        "max_depth": 10,
+        "num_leaves": 128,
+        "min_data_in_leaf": 15,
+        "lambda_l2": 0.005,
+        "feature_fraction": 0.75,
+        "bagging_fraction": 0.75,
+        "bagging_freq": 1,
+        "num_iterations": 300,
+        "verbose": -1,
         "random_state": 42,
-        "n_jobs": -1,                       # 使用所有 CPU 核心
+        "n_jobs": -1,
     }
 
     model = lgb.train(
@@ -358,40 +370,42 @@ def _train_single_model(
         val_pred_ratio = np.clip(eval_model.predict(x_val), 0.0, 1.15)
     else:
         # LightGBM predict 返回的是 numpy array, 直接裁剪
-        val_pred_ratio = np.clip(eval_model.predict(x_val, num_iteration=eval_model.best_iteration or 90), 0.0, 1.15)
+        val_pred_ratio = np.clip(eval_model.predict(x_val, num_iteration=eval_model.best_iteration or 300), 0.0, 1.15)
 
     validation_frame["predicted_ratio"] = val_pred_ratio
     validation_frame["predicted_power_mw"] = validation_frame["predicted_ratio"] * validation_frame["capacity_mw"]
     validation_frame["abs_error_ratio"] = (validation_frame["power_ratio"] - validation_frame["predicted_ratio"]).abs()
     validation_frame["abs_error_mw"] = (validation_frame["power_mw"] - validation_frame["predicted_power_mw"]).abs()
 
-    # ---- 4. 训练最终模型 (用更多数据) ----
-    full_medians = train_frame[feature_columns].median().fillna(0.0).to_dict()
+    # ---- 4. 训练最终模型 (用更多数据, 但只用测试集也有的特征) ----
+    # 测试集没有 power_ratio 所以没有滞后特征, 最终模型只用测试集也有的特征
+    test_feature_columns = [c for c in feature_columns if c in test_frame.columns]
+    full_medians = train_frame[test_feature_columns].median().fillna(0.0).to_dict()
     sampled_full_train = _sample_frame(train_frame, MAX_FINAL_ROWS, random_state=43)
 
     if model_type == MODEL_TYPE_HISTGB:
         final_model = _fit_model_histgb(
-            _prepare_matrix(sampled_full_train, feature_columns, full_medians),
+            _prepare_matrix(sampled_full_train, test_feature_columns, full_medians),
             sampled_full_train["power_ratio"],
         )
         train_pred = np.clip(
-            final_model.predict(_prepare_matrix(train_frame, feature_columns, full_medians)), 0.0, 1.15
+            final_model.predict(_prepare_matrix(train_frame, test_feature_columns, full_medians)), 0.0, 1.15
         )
         test_pred = np.clip(
-            final_model.predict(_prepare_matrix(test_frame, feature_columns, full_medians)), 0.0, 1.15
+            final_model.predict(_prepare_matrix(test_frame, test_feature_columns, full_medians)), 0.0, 1.15
         )
     else:
         final_model = _fit_model_lgb(
-            _prepare_matrix(sampled_full_train, feature_columns, full_medians),
+            _prepare_matrix(sampled_full_train, test_feature_columns, full_medians),
             sampled_full_train["power_ratio"],
         )
         train_pred = np.clip(
-            final_model.predict(_prepare_matrix(train_frame, feature_columns, full_medians),
-                                num_iteration=final_model.best_iteration or 90), 0.0, 1.15
+            final_model.predict(_prepare_matrix(train_frame, test_feature_columns, full_medians),
+                                num_iteration=final_model.best_iteration or 300), 0.0, 1.15
         )
         test_pred = np.clip(
-            final_model.predict(_prepare_matrix(test_frame, feature_columns, full_medians),
-                                num_iteration=final_model.best_iteration or 90), 0.0, 1.15
+            final_model.predict(_prepare_matrix(test_frame, test_feature_columns, full_medians),
+                                num_iteration=final_model.best_iteration or 300), 0.0, 1.15
         )
 
     train_frame["predicted_ratio"] = train_pred
