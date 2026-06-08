@@ -117,6 +117,91 @@ def ask():
     return jsonify(system.answer_question(question))
 
 
+# ============================================================================
+# 动态数据加载接口
+# ============================================================================
+
+@app.route("/api/upload/predict", methods=["POST"])
+def upload_predict():
+    """上传测试集 CSV 文件, 返回预测结果 JSON (供前端展示)
+
+    请求: multipart/form-data, 字段名 "file"
+    返回: JSON { columns: [...], rows: [[...], ...], total: N }
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "请上传 CSV 文件, 字段名: file"}), 400
+
+    uploaded = request.files["file"]
+    if uploaded.filename == "":
+        return jsonify({"error": "未选择文件"}), 400
+    if not uploaded.filename.lower().endswith(".csv"):
+        return jsonify({"error": "仅支持 .csv 格式"}), 400
+
+    try:
+        from io import BytesIO
+        import pandas as pd
+        csv_bytes = BytesIO(uploaded.read())
+        result_buffer = system.predict_on_upload(csv_bytes)
+        # 解析为 JSON
+        result_buffer.seek(0)
+        df = pd.read_csv(result_buffer)
+        resp = {
+            "filename": uploaded.filename,
+            "columns": list(df.columns),
+            "rows": df.values.tolist(),
+            "total": len(df),
+        }
+        # 如果结果包含实际功率列, 附加精度指标
+        if "实际功率_MW" in df.columns:
+            from sklearn.metrics import mean_absolute_error, r2_score
+            import numpy as np
+            actual = df["实际功率_MW"].dropna()
+            predicted = df["预测功率_MW"].loc[actual.index]
+            resp["has_actual"] = True
+            resp["mae_mw"] = round(float(mean_absolute_error(actual, predicted)), 3)
+            resp["r2"] = round(float(r2_score(actual, predicted)), 4)
+            resp["rmse_mw"] = round(float(np.sqrt(((actual - predicted) ** 2).mean())), 3)
+        return jsonify(resp)
+    except Exception as e:
+        return jsonify({"error": f"预测失败: {str(e)}"}), 500
+
+
+@app.route("/api/upload/predict/download", methods=["POST"])
+def upload_predict_download():
+    """上传 CSV 并直接下载预测结果文件"""
+    if "file" not in request.files:
+        return jsonify({"error": "请上传 CSV 文件"}), 400
+    uploaded = request.files["file"]
+    try:
+        from io import BytesIO
+        csv_bytes = BytesIO(uploaded.read())
+        result = system.predict_on_upload(csv_bytes)
+        return send_file(
+            result, as_attachment=True,
+            download_name=f"predicted_{uploaded.filename}",
+            mimetype="text/csv",
+        )
+    except Exception as e:
+        return jsonify({"error": f"预测失败: {str(e)}"}), 500
+
+
+@app.route("/api/download/template")
+def download_template():
+    """下载示例测试集 CSV 模板 (不含实际功率, 用于测试上传接口)
+
+    返回: 默认测试集文件 (test_weather.csv), 去掉出力(MW)列
+    """
+    template_path = PROJECT_ROOT / "data" / "raw" / "test_weather.csv"
+    if not template_path.exists():
+        return jsonify({"error": "模板文件不存在"}), 404
+    return send_file(
+        str(template_path),
+        as_attachment=True,
+        download_name="test_template.csv",
+        mimetype="text/csv",
+    )
+
+
 @app.route("/api/export/forecast.csv")
 def export_forecast():
     """导出测试集预测结果为 CSV 文件

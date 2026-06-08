@@ -1615,6 +1615,41 @@ textarea {
   background: rgba(99, 224, 213, 0.06);
 }
 
+/* 上传行 */
+.upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.result-table th {
+  text-align: left;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.04);
+  color: var(--text-soft);
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  white-space: nowrap;
+}
+
+.result-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  white-space: nowrap;
+}
+
+.risk-cell-td {
+  font-weight: 600;
+  color: var(--amber);
+}
+
 /* ========================================================================
    响应式回退
    ======================================================================== */

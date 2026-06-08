@@ -1252,6 +1252,159 @@ class OffshoreWindAgentSystem:
     # 数据导出
     # ========================================================================
 
+    # ========================================================================
+    # 动态数据加载接口 — 上传新测试集CSV, 返回预测结果
+    # ========================================================================
+
+    def predict_on_upload(self, csv_file: BytesIO) -> BytesIO:
+        """接收上传的 CSV 文件 (格式同 test_weather.csv), 返回预测结果 CSV
+
+        流程:
+          1. 读取上传的 CSV (多编码回退)
+          2. 合并站点信息 (装机容量等)
+          3. 特征工程 (38+7维)
+          4. 预测功率 + 风险评分 + 调度建议
+          5. 返回包含预测结果的 CSV
+
+        Args:
+            csv_file: 上传的 CSV 文件 (BytesIO)
+
+        Returns:
+            BytesIO: 预测结果 CSV (含 predicted_power_mw, risk_score, action_label)
+        """
+        from io import StringIO
+        from .data_utils import engineer_features, read_csv_with_fallback
+        from .forecasting import compute_risk, _prepare_matrix, _add_site_columns
+        from .rl_control import pick_action
+
+        assert self.forecast_bundle is not None
+
+        # 1. 读取上传文件 (多编码回退)
+        raw_bytes = csv_file.read()
+        df = None
+        last_err = None
+        for encoding in ("gb18030", "utf-8-sig", "utf-8", "gbk"):
+            try:
+                df = pd.read_csv(BytesIO(raw_bytes), encoding=encoding)
+                break
+            except Exception as e:
+                last_err = e
+        if df is None:
+            raise ValueError(f"无法解析上传的 CSV 文件: {last_err}")
+
+        # 2. 列名智能映射 — 支持多种中文列名格式
+        # 先试精确匹配, 不行再模糊匹配
+        from .data_utils import WEATHER_MAP, SITE_INFO_MAP
+
+        # 精确匹配
+        df = df.rename(columns={k: v for k, v in WEATHER_MAP.items() if k in df.columns})
+
+        # 模糊匹配 — 处理简写列名 (如 "气压" → "pressure")
+        _FUZZY_MAP = {
+            "时间": "timestamp", "气压": "pressure", "相对湿度": "humidity", "湿度": "humidity",
+            "云量": "cloud_cover", "温度": "temperature_k", "辐照强度": "irradiance", "辐照": "irradiance",
+            "降水": "precipitation", "10米风速": "wind10_speed", "10米风向": "wind10_dir",
+            "100m风速": "wind100_speed", "100m风向": "wind100_dir",
+            "站点编号": "site_id", "场站编号": "site_id", "站点": "site_id",
+            "出力": "power_mw", "实际功率": "power_mw", "功率": "power_mw",
+            "装机容量": "capacity_mw",
+        }
+        df = df.rename(columns={k: v for k, v in _FUZZY_MAP.items() if k in df.columns})
+
+        # 3. 数值类型转换 + 缺失列补默认值
+        numeric_cols = [
+            "pressure", "humidity", "cloud_cover", "wind10_speed",
+            "temperature_k", "irradiance", "precipitation", "wind100_speed",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            else:
+                df[col] = 0.0
+        # 风向列可选 — 缺失补0
+        for col in ["wind10_dir", "wind100_dir"]:
+            if col not in df.columns:
+                df[col] = 0.0
+            else:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+        # 4. 合并站点信息 (如果文件没有 capacity_mw 列则合并)
+        if "capacity_mw" not in df.columns or df["capacity_mw"].isna().all():
+            if self.dataset_bundle is not None:
+                df = df.merge(
+                    self.dataset_bundle.site_info[["site_id", "capacity_mw"]],
+                    on="site_id", how="left"
+                )
+            else:
+                site_info = read_csv_with_fallback(self.raw_dir / "train_site_info.csv")
+                site_info = site_info.rename(columns=SITE_INFO_MAP)
+                site_info["capacity_mw"] = site_info["capacity_mw"].astype(float)
+                df = df.merge(site_info[["site_id", "capacity_mw"]], on="site_id", how="left")
+
+        df["capacity_mw"] = pd.to_numeric(df["capacity_mw"], errors="coerce").fillna(50).astype(float)
+        if "site_id" not in df.columns:
+            df["site_id"] = "f1"  # 默认站点
+
+        # 检测文件是否含真实功率 (用于精度评估)
+        has_actual_power = "power_mw" in df.columns and df["power_mw"].notna().sum() > 0
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.sort_values(["site_id", "timestamp"]).reset_index(drop=True)
+
+        # 填充缺失气象数据 (扩展列表包含所有可能的特征列)
+        all_fill_cols = numeric_cols + ["wind10_dir", "wind100_dir", "cloud_cover"]
+        for col in all_fill_cols:
+            if col in df.columns and df[col].isna().any():
+                df[col] = df.groupby("site_id")[col].transform(lambda x: x.ffill().bfill())
+
+        # 5. 特征工程
+        site_ids = self.forecast_bundle.site_ids
+        df = engineer_features(df, site_ids)
+
+        # 6. 预测
+        feature_cols = _add_site_columns(df, site_ids)
+        feature_cols = [c for c in feature_cols if c in df.columns]
+        x = _prepare_matrix(df, feature_cols, self.forecast_bundle.feature_medians)
+
+        if self.forecast_bundle.lgbm_model is not None and self.forecast_bundle.model_type != "histgb":
+            try:
+                pred_ratio = np.clip(
+                    self.forecast_bundle.lgbm_model.predict(x, num_iteration=self.forecast_bundle.lgbm_model.best_iteration or 300),
+                    0.0, 1.15
+                )
+            except Exception:
+                pred_ratio = np.clip(self.forecast_bundle.model.predict(x), 0.0, 1.15)
+        else:
+            pred_ratio = np.clip(self.forecast_bundle.model.predict(x), 0.0, 1.15)
+
+        df["predicted_ratio"] = pred_ratio
+        df["predicted_power_mw"] = (df["predicted_ratio"] * df["capacity_mw"]).clip(lower=0.0, upper=df["capacity_mw"])
+        df["risk_score"] = compute_risk(df, df["predicted_ratio"], self.forecast_bundle.risk_reference)
+
+        # 7. 调度建议
+        for idx, row in df.iterrows():
+            action = pick_action(row, self.rl_bundle.q_table, self.forecast_bundle.site_ids, dqn_agent=self.dqn_agent)
+            df.at[idx, "action_label"] = action["action_label"]
+            df.at[idx, "recommended_dispatch_mw"] = action["recommended_dispatch_mw"]
+
+        # 8. 输出 (如果文件含真实功率, 附加误差列)
+        base_cols = ["site_id", "timestamp", "predicted_power_mw", "risk_score", "action_label", "recommended_dispatch_mw"]
+        base_names = ["场站编号", "时间", "预测功率_MW", "风险评分", "推荐调度策略", "推荐调度功率_MW"]
+
+        if has_actual_power:
+            df["abs_error_mw"] = (df["power_mw"] - df["predicted_power_mw"]).abs()
+            base_cols = ["site_id", "timestamp", "power_mw", "predicted_power_mw", "abs_error_mw", "risk_score", "action_label", "recommended_dispatch_mw"]
+            base_names = ["场站编号", "时间", "实际功率_MW", "预测功率_MW", "绝对误差_MW", "风险评分", "推荐调度策略", "推荐调度功率_MW"]
+
+        out = df[[c for c in base_cols if c in df.columns]].copy()
+        # 用存在的列名对应
+        present_names = [n for c, n in zip(base_cols, base_names) if c in df.columns]
+        out.columns = present_names
+
+        buffer = BytesIO()
+        buffer.write(out.to_csv(index=False).encode("utf-8-sig"))
+        buffer.seek(0)
+        return buffer
+
     def export_forecast_csv(self) -> BytesIO:
         """导出验证集预测 vs 实际对比结果为 CSV"""
         assert self.forecast_bundle is not None

@@ -237,21 +237,32 @@ def engineer_features(frame: pd.DataFrame, site_ids: Iterable[str]) -> pd.DataFr
     df["doy_sin"] = np.sin(2.0 * np.pi * df["dayofyear"] / 365.0)
     df["doy_cos"] = np.cos(2.0 * np.pi * df["dayofyear"] / 365.0)
 
-    # ---- 2. 风向分解为 U/V 分量 ----
-    # 原因: 风向 359° 和 1° 在数值上相差 358°, 但在几何上只差 2°
-    #       U = speed × cos(dir), V = speed × sin(dir) 可以避免此问题
-    wind10_rad = np.deg2rad(df["wind10_dir"])
-    wind100_rad = np.deg2rad(df["wind100_dir"])
-    df["wind10_u"] = df["wind10_speed"] * np.cos(wind10_rad)
-    df["wind10_v"] = df["wind10_speed"] * np.sin(wind10_rad)
-    df["wind100_u"] = df["wind100_speed"] * np.cos(wind100_rad)
-    df["wind100_v"] = df["wind100_speed"] * np.sin(wind100_rad)
+    # ---- 2. 风向分解为 U/V 分量 (风向列缺失时跳过, 用0填充) ----
+    if "wind10_dir" in df.columns:
+        wind10_rad = np.deg2rad(df["wind10_dir"])
+        df["wind10_u"] = df["wind10_speed"] * np.cos(wind10_rad)
+        df["wind10_v"] = df["wind10_speed"] * np.sin(wind10_rad)
+    else:
+        df["wind10_u"] = 0.0
+        df["wind10_v"] = 0.0
+    if "wind100_dir" in df.columns:
+        wind100_rad = np.deg2rad(df["wind100_dir"])
+        df["wind100_u"] = df["wind100_speed"] * np.cos(wind100_rad)
+        df["wind100_v"] = df["wind100_speed"] * np.sin(wind100_rad)
+    else:
+        df["wind100_u"] = 0.0
+        df["wind100_v"] = 0.0
 
-    # ---- 3. 物理计算特征 ----
-    df["wind_shear"] = df["wind100_speed"] - df["wind10_speed"]  # 风切变 (垂直梯度)
-    df["temperature_c"] = df["temperature_k"] - 273.15            # 摄氏温度
-    # 空气密度: ρ = P / (R·T), R=287.05 (理想气体状态方程)
-    df["air_density"] = df["pressure"] / (287.05 * df["temperature_k"])
+    # ---- 3. 物理计算特征 (缺失列时用默认值) ----
+    if "wind100_speed" in df.columns and "wind10_speed" in df.columns:
+        df["wind_shear"] = df["wind100_speed"] - df["wind10_speed"]
+    else:
+        df["wind_shear"] = 0.0
+    df["temperature_c"] = df.get("temperature_k", 288) - 273.15
+    # 空气密度: ρ = P / (R·T), R=287.05
+    pressure = df.get("pressure", 101325)
+    temp_k = df.get("temperature_k", 288)
+    df["air_density"] = pressure / (287.05 * temp_k)
 
     # ---- 4. 滚动统计特征 (捕捉短期趋势) ----
     _rolling_feature(df, "wind100_speed", 4, "wind100_speed_roll4")   # 1小时均值

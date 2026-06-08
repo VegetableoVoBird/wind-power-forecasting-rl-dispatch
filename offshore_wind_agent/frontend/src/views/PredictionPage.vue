@@ -2,6 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useDashboard } from '../composables/useDashboard'
 
+const API_BASE = '/api'
+
 const {
   stationOverview,
   currentSiteId,
@@ -10,6 +12,46 @@ const {
   ensureSiteLoaded,
   fmt,
 } = useDashboard()
+
+// ---- 文件上传预测 ----
+const uploadFile = ref(null)
+const uploading = ref(false)
+const uploadMsg = ref('')
+const predictResult = ref(null)  // { columns, rows, total, filename }
+
+function onFileChange(e) {
+  uploadFile.value = e.target.files[0] || null
+  uploadMsg.value = ''
+}
+
+async function handleUpload() {
+  if (!uploadFile.value) { uploadMsg.value = '请先选择 CSV 文件'; return }
+  uploading.value = true; uploadMsg.value = '正在预测...'; predictResult.value = null
+  try {
+    const form = new FormData(); form.append('file', uploadFile.value)
+    const resp = await fetch(`${API_BASE}/upload/predict`, { method: 'POST', body: form })
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || '上传失败') }
+    predictResult.value = await resp.json()
+    const r = predictResult.value
+    if (r.has_actual) {
+      uploadMsg.value = `完成, 共 ${r.total} 条 | MAE=${fmt(r.mae_mw)}MW R²=${fmt(r.r2,4)}`
+    } else {
+      uploadMsg.value = `完成, 共 ${r.total} 条预测结果`
+    }
+  } catch (e) { uploadMsg.value = `失败: ${e.message}` }
+  finally { uploading.value = false }
+}
+
+async function downloadResult() {
+  if (!uploadFile.value) return
+  const form = new FormData(); form.append('file', uploadFile.value)
+  const resp = await fetch(`${API_BASE}/upload/predict/download`, { method: 'POST', body: form })
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = `predicted_${uploadFile.value.name}`
+  a.click(); URL.revokeObjectURL(url)
+}
 
 const selectedSiteId = ref('')
 const sites = computed(() => stationOverview.value)
@@ -171,6 +213,45 @@ onMounted(async () => {
           <span><i class="legend-swatch actual"></i>实际功率</span>
           <span><i class="legend-swatch forecast"></i>模型预测</span>
         </div>
+      </div>
+    </section>
+
+    <!-- 动态数据加载 -->
+    <section class="page-panel wide-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">数据加载</p>
+          <h3>上传测试集 CSV 获取预测结果</h3>
+          <p>上传格式与默认测试集相同的 CSV 文件（含站点编号、时间、气象变量，不含实际功率），系统将自动预测并返回结果。</p>
+        </div>
+      </div>
+      <div class="upload-row">
+        <input type="file" accept=".csv" @change="onFileChange" class="filter-input" style="max-width:400px" />
+        <button class="button primary" :disabled="uploading" @click="handleUpload">
+          {{ uploading ? '预测中...' : '上传并预测' }}
+        </button>
+        <button v-if="predictResult" class="button ghost" @click="downloadResult">下载 CSV</button>
+        <a class="button ghost" :href="`${API_BASE}/download/template`">下载模板</a>
+      </div>
+      <div v-if="uploadMsg" class="toast-banner" style="margin-top:10px">{{ uploadMsg }}</div>
+
+      <!-- 预测结果表格 -->
+      <div v-if="predictResult" style="margin-top:16px; max-height:400px; overflow:auto">
+        <table class="result-table">
+          <thead>
+            <tr><th v-for="col in predictResult.columns" :key="col">{{ col }}</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, i) in predictResult.rows.slice(0, 100)" :key="i">
+              <td v-for="(cell, j) in row" :key="j" :class="{ 'risk-cell-td': predictResult.columns[j] === '风险评分' }">
+                {{ typeof cell === 'number' ? fmt(cell, Number(cell) < 1 ? 4 : 2) : cell }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="predictResult.rows.length > 100" style="color:var(--text-dim);padding:8px;font-size:12px">
+          显示前 100 条, 共 {{ predictResult.total }} 条。下载 CSV 获取完整结果。
+        </p>
       </div>
     </section>
 
