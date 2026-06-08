@@ -66,6 +66,32 @@ const dailyComparison = computed(() => {
   }
 })
 
+// 选中日期的动作分布 (从前端series中统计)
+const dailyActions = computed(() => {
+  if (!selectedDate.value) return []
+  const dateSeries = (currentSite.value?.forecast_series || []).filter(
+    s => s.timestamp && s.timestamp.startsWith(selectedDate.value.slice(5))
+  )
+  const counts = {}
+  dateSeries.forEach(s => {
+    const label = s.action_label || '未知'
+    counts[label] = (counts[label] || 0) + 1
+  })
+  const total = dateSeries.length || 1
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count, pct: Math.round(count / total * 100) }))
+    .sort((a, b) => b.count - a.count)
+})
+
+// 选中日期的全部时段 (96个时间点, 从forecast_series中筛选)
+const dailyTimeSlots = computed(() => {
+  if (!selectedDate.value) return []
+  const datePrefix = selectedDate.value.slice(5) // "MM-DD"
+  return (currentSite.value?.forecast_series || []).filter(
+    s => s.timestamp && s.timestamp.startsWith(datePrefix)
+  )
+})
+
 watch(filteredStations, async (sites) => {
   if (!sites.length) return
   if (!sites.some((site) => site.site_id === currentSiteId.value)) {
@@ -242,6 +268,13 @@ function closeDrawer() {
                 <strong>{{ dailyComparison?.diff }} MWh</strong>
               </div>
             </div>
+            <!-- 当日策略分布 -->
+            <div v-if="dailyActions.length" class="daily-action-strip">
+              <span class="eyebrow" style="margin-bottom:6px">当日调度策略分布</span>
+              <div class="action-bar-row">
+                <span v-for="a in dailyActions" :key="a.name" class="action-pct-chip">{{ a.name }} {{ a.pct }}%</span>
+              </div>
+            </div>
           </article>
 
           <!-- 分页日期导航 -->
@@ -268,34 +301,38 @@ function closeDrawer() {
       <article class="page-panel">
         <div class="panel-head">
           <div>
-            <p class="eyebrow">悬浮情报</p>
-            <h3>高风险窗口详情</h3>
-            <p>展示当前站点在验证集中风险最高的时段，含实际与预测对比。</p>
+            <p class="eyebrow">时段调度</p>
+            <h3>{{ selectedDate || '--' }} — 全时段调度建议</h3>
+            <p>当天所有时间点的调度策略。红色背景 = 高风险时段（风险≥0.45），建议保守操作。</p>
           </div>
         </div>
-        <div class="table-list">
+        <div v-if="!dailyTimeSlots.length" style="padding:16px;color:var(--text-dim)">
+          暂无数据。
+        </div>
+        <div v-else class="timeslot-list">
           <div
-            v-for="row in siteTopWindows"
+            v-for="row in dailyTimeSlots"
             :key="row.timestamp"
-            class="table-row table-row-site"
+            class="timeslot-row"
+            :class="{ 'high-risk': Number(row.risk_score) >= 0.45 }"
             @mouseenter="hoveredWindow = row"
             @mouseleave="hoveredWindow = null"
           >
-            <strong>{{ row.timestamp }}</strong>
-            <span>实际 {{ fmt(row.actual_power_mw) }} / 预测 {{ fmt(row.predicted_power_mw) }} MW</span>
-            <span class="risk-pill" :class="riskTone(row.risk_score)">{{ fmt(row.risk_score, 3) }}</span>
-            <span>{{ row.action_label }}</span>
+            <strong>{{ (row.timestamp || '').slice(6) }}</strong>
+            <span class="timeslot-power">实{{ fmt(row.actual_power_mw) }} / 预{{ fmt(row.predicted_power_mw) }} MW</span>
+            <span class="risk-pill" :class="riskTone(row.risk_score)">{{ fmt(row.risk_score, 2) }}</span>
+            <span class="timeslot-action">{{ row.action_label }}</span>
           </div>
         </div>
         <div v-if="hoveredWindow" class="hover-detail-card">
-          <span>悬浮情报</span>
+          <span>详情</span>
           <strong>{{ hoveredWindow.timestamp }}</strong>
           <small>
             风险 {{ fmt(hoveredWindow.risk_score, 3) }} ·
             实际 {{ fmt(hoveredWindow.actual_power_mw) }} MW ·
             预测 {{ fmt(hoveredWindow.predicted_power_mw) }} MW ·
             误差 {{ fmt(Math.abs(hoveredWindow.actual_power_mw - hoveredWindow.predicted_power_mw), 3) }} MW ·
-            建议 {{ hoveredWindow.action_label }}
+            {{ hoveredWindow.action_label }}
           </small>
         </div>
       </article>
@@ -342,9 +379,9 @@ function closeDrawer() {
           </div>
 
           <div class="drawer-section">
-            <span>近端高风险建议</span>
+            <span>当日调度摘要 ({{ selectedDate || '--' }})</span>
             <div class="summary-stack">
-              <article v-for="row in siteTopWindows.slice(0, 4)" :key="row.timestamp" class="summary-line-card">
+              <article v-for="row in dailyTimeSlots.filter(r => Number(r.risk_score) >= 0.45).slice(0, 4)" :key="row.timestamp" class="summary-line-card">
                 <span>{{ row.timestamp }}</span>
                 <strong>{{ row.action_label }}</strong>
                 <small>风险 {{ fmt(row.risk_score, 3) }} · 实际 {{ fmt(row.actual_power_mw) }} MW · 预测 {{ fmt(row.predicted_power_mw) }} MW</small>

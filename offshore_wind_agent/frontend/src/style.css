@@ -796,6 +796,28 @@ textarea {
   margin-bottom: 10px;
 }
 
+.daily-action-strip {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+.action-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.action-pct-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(99, 224, 213, 0.08);
+  border: 1px solid rgba(99, 224, 213, 0.18);
+  color: var(--aqua);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .daily-mini-calendar {
   display: flex;
   flex-wrap: wrap;
@@ -1596,6 +1618,51 @@ textarea {
 /* ========================================================================
    响应式回退
    ======================================================================== */
+
+/* 全时段调度表 */
+.timeslot-list {
+  display: grid;
+  gap: 2px;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.timeslot-row {
+  display: grid;
+  grid-template-columns: 50px 1fr 50px 80px;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  border: 1px solid transparent;
+  transition: background 0.12s;
+}
+
+.timeslot-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.timeslot-row.high-risk {
+  background: rgba(255, 112, 97, 0.12);
+  border-color: rgba(255, 112, 97, 0.2);
+}
+
+.timeslot-row strong {
+  color: var(--text-soft);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.timeslot-power {
+  color: var(--text-soft);
+}
+
+.timeslot-action {
+  text-align: right;
+  font-weight: 600;
+  font-size: 12px;
+}
 
 .drawer-fade-enter-active,
 .drawer-fade-leave-active {
