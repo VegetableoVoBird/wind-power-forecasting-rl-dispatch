@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { askAgent, fetchDashboard, fetchSite, getExportUrl, saveUpload, listUploads, getUploadDetail, getUploadSiteData, deleteUpload } from '../services/agentApi'
+import { askAgent, refreshAgent, fetchDashboard, fetchSite, getExportUrl, saveUpload, listUploads, getUploadDetail, getUploadSiteData, deleteUpload } from '../services/agentApi'
 
 const dashboard = ref(null)
 const siteMap = ref({})
@@ -112,6 +112,23 @@ async function ensureSiteLoaded(siteId) {
     throw error
   } finally {
     siteLoading.value = false
+  }
+}
+
+async function refreshOllamaStatus() {
+  try {
+    const result = await refreshAgent()
+    if (dashboard.value) {
+      dashboard.value.agent_backend = {
+        available: result.available,
+        backend: result.available ? 'ollama' : 'rule-based',
+        model: result.model,
+        message: result.message,
+      }
+    }
+    return result
+  } catch {
+    return { available: false, model: null, message: '刷新失败' }
   }
 }
 
@@ -240,6 +257,7 @@ export function useDashboard() {
     ensureDashboardLoaded,
     ensureSiteLoaded,
     submitQuestion,
+    refreshOllamaStatus,
     // upload
     uploadList,
     currentUploadId,

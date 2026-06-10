@@ -473,6 +473,10 @@ h3 {
   stroke-width: 2.8;
 }
 
+.path-dim {
+  opacity: 0.25;
+}
+
 .path-ghost {
   fill: none;
   stroke: rgba(99, 224, 213, 0.18);

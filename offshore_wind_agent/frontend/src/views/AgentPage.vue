@@ -12,11 +12,22 @@ const {
   asking,
   ensureDashboardLoaded,
   submitQuestion,
+  refreshOllamaStatus,
   fmt,
 } = useDashboard()
 
 const question = ref('')
 const exportToast = ref('')
+const refreshingOllama = ref(false)
+
+async function handleRefreshOllama() {
+  refreshingOllama.value = true
+  try {
+    await refreshOllamaStatus()
+  } finally {
+    refreshingOllama.value = false
+  }
+}
 
 const quickQuestions = computed(() => [
   '请解释当前系统在验证集上的预测精度如何',
@@ -67,8 +78,20 @@ onMounted(() => {
           <div class="agent-status-stack">
             <div class="context-card">
               <span>问答后端</span>
-              <strong>{{ agentBackend ? `${agentBackend.backend} · ${agentBackend.model || 'fallback'}` : '加载中...' }}</strong>
-              <small>{{ agentBackend?.message || '等待问答模块上线。' }}</small>
+              <strong>
+                <span v-if="agentBackend?.available" style="color:#4caf50">Ollama 已连接</span>
+                <span v-else style="color:#ff9800">规则问答 (Ollama 未连接)</span>
+              </strong>
+              <small v-if="agentBackend?.model">模型: {{ agentBackend.model }}</small>
+              <small v-else>{{ agentBackend?.message || '请确保 Ollama 已启动并点击重连' }}</small>
+              <button
+                class="button ghost"
+                style="margin-top:8px;font-size:12px;padding:4px 12px"
+                :disabled="refreshingOllama"
+                @click="handleRefreshOllama"
+              >
+                {{ refreshingOllama ? '重连中...' : '重连 Ollama' }}
+              </button>
             </div>
             <div class="context-card">
               <span>当前站点</span>

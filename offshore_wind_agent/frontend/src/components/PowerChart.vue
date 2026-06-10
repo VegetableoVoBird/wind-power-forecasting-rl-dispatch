@@ -58,6 +58,7 @@ function buildSvg() {
   const risk = vs.map(r => { const v = Number(r.risk_score); return Number.isFinite(v) ? v : 0 })
 
   const useRiskScale = props.viewMode === 'risk'
+  const useDispatchFocus = props.viewMode === 'dispatch'
   const allVals = [...predicted, ...dispatch, ...actual]
   const maxV = useRiskScale
     ? Math.max(...risk, 0.8) * 1.08   // 风险模式: 至少0.8, 顶部留8%padding
@@ -117,8 +118,13 @@ function buildSvg() {
         elements += `\n<text x="${W-P-4}" y="${(ty-4).toFixed(1)}" text-anchor="end" class="threshold-label">${t.label}</text>`
       }
     })
+  } else if (useDispatchFocus) {
+    // ---- 调度聚焦模式: 突出调度线, 其他线半透明 ----
+    if (hasActual && lineVisible.actual) elements += `\n<path d="${toPath(actual)}" class="path-actual path-dim"/>`
+    if (lineVisible.predicted) elements += `\n<path d="${toPath(predicted)}" class="path-forecast path-dim"/>`
+    if (lineVisible.dispatch) elements += `\n<path d="${toPath(dispatch)}" class="path-dispatch only"/>`
   } else {
-    // ---- 功率模式 ----
+    // ---- 功率对比模式 ----
     if (hasActual && lineVisible.actual) elements += `\n<path d="${toPath(actual)}" class="path-actual"/>`
     if (lineVisible.predicted) elements += `\n<path d="${toPath(predicted)}" class="path-forecast"/>`
     if (lineVisible.dispatch) elements += `\n<path d="${toPath(dispatch)}" class="path-dispatch"/>`

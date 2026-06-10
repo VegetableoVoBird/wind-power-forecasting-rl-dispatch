@@ -101,6 +101,16 @@ def comparison():
     })
 
 
+@app.route("/api/agent/refresh", methods=["POST"])
+def refresh_agent():
+    """手动刷新 Ollama 连接状态
+
+    当 Ollama 服务在系统启动后就绪时, 调用此接口重新检测连接。
+    返回 JSON: {"available": bool, "model": "...", "message": "..."}
+    """
+    return jsonify(system.refresh_ollama())
+
+
 @app.route("/api/ask", methods=["POST"])
 def ask():
     """智能问答接口

@@ -121,9 +121,9 @@ onMounted(async () => {
         <div class="panel-head"><div><p class="eyebrow">策略收益</p><h3>调度策略对比</h3><p>各策略在统一验证环境下的累计收益。越大越好。</p></div></div>
         <div class="rl-bars">
           <div v-for="item in rlComparison" :key="item.policy" class="bar-row">
-            <div><strong>{{ item.policy }}</strong><small>{{ item.dominant_action }}</small></div>
+            <div><strong>{{ item.policy }}</strong> <small>{{ item.dominant_action }}</small></div>
             <div class="bar-track"><div class="bar-fill" :style="{width:(Number(item.avg_reward)/rlMaxReward*100)+'%'}"></div></div>
-            <div class="bar-side"><strong>{{ fmt(item.avg_reward,2) }}</strong><small>事故率 {{ fmt(item.incident_rate,3) }}</small></div>
+            <div class="bar-side"><strong>{{ fmt(item.avg_reward,2) }}</strong><small> 事故率 {{ fmt(item.incident_rate,3) }}</small></div>
           </div>
         </div>
       </article>

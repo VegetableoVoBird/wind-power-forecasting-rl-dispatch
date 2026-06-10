@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venvScriptspython.exe -c ':*)",
+      "Bash(python -c ':*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(.venv/Scripts/pip.exe install:*)",
+      "Bash(./.venv/Scripts/python.exe -c ':*)",
+      "Bash(find \"C:/school/wind-power-forecasting-rl-dispatch/offshore_wind_agent/artifacts/runs\" -name \"*.joblib\" -exec ls -la {} \\\\;)",
+      "Bash(\"./.venv/Scripts/python.exe\" edit_pptx_v3.py)",
+      "Bash(\"./.venv/Scripts/python.exe\" edit_pptx_v3b.py)",
+      "Bash(curl -s http://127.0.0.1:11434/api/tags)",
+      "Bash(node -e ':*)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(taskkill //F //IM pythonw.exe)",
+      "Bash(find offshore_wind_agent -type d -name \"__pycache__\" -exec rm -rf {} +)",
+      "Bash(find . -type f -name \"*.pyc\" -delete)",
+      "Bash(\"./.venv/Scripts/python.exe\" add_balanced_card.py)"
+    ]
+  }
+}

@@ -78,7 +78,7 @@ GA_CROSSOVER_RATE = 0.78     # 交叉率
 GAME_EPISODE_LIMIT = 96      # 游戏评估的 episode 数
 
 # DQN 专用超参数
-DQN_HIDDEN_DIM = 128          # 隐藏层维度
+DQN_HIDDEN_DIM = 256          # 隐藏层维度 (连续特征需要更大容量)
 DQN_EPOCHS = 25               # 训练轮数
 DQN_LR = 0.0003               # Adam 学习率 (降低以提高稳定性)
 DQN_GAMMA = 0.90              # 折扣因子 (与 Q-Learning 保持一致)
@@ -239,6 +239,20 @@ def _build_episode_payloads(frame: pd.DataFrame, site_index: dict[str, int]) -> 
             for i in range(len(group))
         ]
 
+        # DQN 连续状态特征: 比离散 one-hot 包含更丰富的数值信息
+        dqn_states = []
+        for i in range(len(group)):
+            hour_val = hours[i]
+            vec = np.zeros(len(site_index) + 6, dtype=np.float32)
+            vec[site_idx] = 1.0                                          # 站点 one-hot
+            vec[len(site_index)] = pred_ratio[i]                         # 预测功率比
+            vec[len(site_index) + 1] = risk[i]                           # 风险评分
+            vec[len(site_index) + 2] = ramp_abs[i]                       # 风速突变幅度
+            vec[len(site_index) + 3] = np.sin(2.0 * np.pi * hour_val / 24.0)  # 小时循环 sin
+            vec[len(site_index) + 4] = np.cos(2.0 * np.pi * hour_val / 24.0)  # 小时循环 cos
+            vec[len(site_index) + 5] = capacity[i] / 100.0                # 归一化装机容量
+            dqn_states.append(vec)
+
         # 为每个时间片×每个动作计算 reward 和 incident
         reward_matrix = np.zeros((len(group), len(ACTIONS)), dtype=float)
         incident_matrix = np.zeros((len(group), len(ACTIONS)), dtype=float)
@@ -275,6 +289,7 @@ def _build_episode_payloads(frame: pd.DataFrame, site_index: dict[str, int]) -> 
             "site_id": site_id,
             "date": str(group["episode_date"].iloc[0]),
             "states": states,
+            "dqn_states": dqn_states,
             "risk": risk,
             "pred_ratio": pred_ratio,
             "reward_matrix": reward_matrix,
@@ -342,9 +357,9 @@ def _choose_action(
         return _fallback_action(risk_value, pred_value)
 
     if policy_type == "dqn":
-        # DQN 神经网络推理
+        # DQN 神经网络推理 (使用连续特征向量)
         if dqn_agent is not None:
-            return dqn_agent.select_action(state, epsilon=0.0)  # 确定性策略
+            return dqn_agent.select_action(episode["dqn_states"][idx], epsilon=0.0)
         return _fallback_action(risk_value, pred_value)
 
     if policy_type == "aggressive":
@@ -445,7 +460,8 @@ def run_heuristic_search(episodes: list[dict[str, Any]]) -> tuple[list[dict[str,
     """
     examples: list[dict[str, Any]] = []
     rewards = []
-    incidents = []
+    total_incident_steps = 0
+    total_steps = 0
     mix: Counter[int] = Counter()
 
     for episode in episodes:
@@ -473,7 +489,8 @@ def run_heuristic_search(episodes: list[dict[str, Any]]) -> tuple[list[dict[str,
             mix[action_idx] += 1
 
         rewards.append(reward_sum)
-        incidents.append(incident_sum / max(len(actions), 1))
+        total_incident_steps += int(incident_sum)
+        total_steps += len(actions)
         if len(examples) < 3:
             examples.append({
                 "site_id": episode["site_id"],
@@ -487,7 +504,7 @@ def run_heuristic_search(episodes: list[dict[str, Any]]) -> tuple[list[dict[str,
         "policy": "启发式搜索",
         "avg_reward": float(np.mean(rewards) if rewards else 0.0),
         "p10_reward": float(np.percentile(rewards, 10) if rewards else 0.0),
-        "incident_rate": float(np.mean(incidents) if incidents else 0.0),
+        "incident_rate": float(total_incident_steps / max(total_steps, 1)),
         "dominant_action": ACTIONS[mix.most_common(1)[0][0]]["label_zh"] if mix else ACTIONS[1]["label_zh"],
         "action_mix": {ACTIONS[idx]["label_zh"]: int(count) for idx, count in sorted(mix.items())},
     }
@@ -559,11 +576,12 @@ def run_genetic_algorithm(episodes: list[dict[str, Any]]) -> tuple[list[dict[str
         (examples, summaries): 样例和统计摘要
     """
     random = Random(42)
-    # 选取风险最高的前12个 episode 进行 GA 优化
-    selected = sorted(episodes, key=lambda item: float(item["risk"].mean()), reverse=True)[: min(12, len(episodes))]
+    # 在所有 episode 上运行 GA, 与其他算法公平对比
+    selected = list(episodes)
     examples: list[dict[str, Any]] = []
     rewards = []
-    incidents = []
+    total_incident_steps = 0
+    total_episode_steps = 0
     mix: Counter[int] = Counter()
 
     for episode in selected:
@@ -580,6 +598,7 @@ def run_genetic_algorithm(episodes: list[dict[str, Any]]) -> tuple[list[dict[str
         population = _initial_population(random, base_actions, len(base_actions))
         best_actions = base_actions[:]
         best_reward, best_incident = _evaluate_action_sequence(episode, best_actions)
+        best_fitness = best_reward - best_incident * 320.0
 
         # GA 迭代
         for _ in range(GA_GENERATIONS):
@@ -592,7 +611,8 @@ def run_genetic_algorithm(episodes: list[dict[str, Any]]) -> tuple[list[dict[str
                 )
                 fitness = reward - incident_rate * 320.0 - volatility_penalty
                 scored.append((fitness, individual[:]))
-                if reward > best_reward:
+                if fitness > best_fitness:
+                    best_fitness = fitness
                     best_reward = reward
                     best_incident = incident_rate
                     best_actions = individual[:]
@@ -610,7 +630,8 @@ def run_genetic_algorithm(episodes: list[dict[str, Any]]) -> tuple[list[dict[str
             population = next_population
 
         rewards.append(best_reward)
-        incidents.append(best_incident)
+        total_incident_steps += int(best_incident * len(best_actions))
+        total_episode_steps += len(best_actions)
         for action_idx in best_actions:
             mix[action_idx] += 1
         if len(examples) < 3:
@@ -626,7 +647,7 @@ def run_genetic_algorithm(episodes: list[dict[str, Any]]) -> tuple[list[dict[str
         "policy": "遗传算法",
         "avg_reward": float(np.mean(rewards) if rewards else 0.0),
         "p10_reward": float(np.percentile(rewards, 10) if rewards else 0.0),
-        "incident_rate": float(np.mean(incidents) if incidents else 0.0),
+        "incident_rate": float(total_incident_steps / max(total_episode_steps, 1)),
         "dominant_action": ACTIONS[mix.most_common(1)[0][0]]["label_zh"] if mix else ACTIONS[1]["label_zh"],
         "action_mix": {ACTIONS[idx]["label_zh"]: int(count) for idx, count in sorted(mix.items())},
     }
@@ -650,6 +671,8 @@ def run_game_evaluation(
         : min(GAME_EPISODE_LIMIT, len(episodes))
     ]
     q_rewards = []
+    q_incidents = 0
+    q_steps = 0
     dqn_rewards = []
     heuristic_rewards = []
     ga_rewards = []
@@ -660,6 +683,8 @@ def run_game_evaluation(
         for idx in range(len(episode["states"])):
             q_action = _choose_action("learned", episode, idx, q_table)
             q_reward += float(episode["reward_matrix"][idx, q_action])
+            q_incidents += int(episode["incident_matrix"][idx, q_action])
+            q_steps += 1
         q_rewards.append(q_reward)
 
         # DQN 策略 (如果可用)
@@ -695,6 +720,7 @@ def run_game_evaluation(
                 "把日级调度任务视为序列决策博弈，对比学习策略与搜索型对手策略的差异。"
             ),
             "q_learning_avg_reward": round(float(np.mean(q_rewards) if q_rewards else 0.0), 2),
+            "q_learning_incident_rate": round(float(q_incidents / max(q_steps, 1)), 4),
             "heuristic_avg_reward": round(float(np.mean(heuristic_rewards) if heuristic_rewards else 0.0), 2),
             "ga_seed_avg_reward": round(float(np.mean(ga_rewards) if ga_rewards else 0.0), 2),
         }
@@ -741,7 +767,7 @@ def build_experiment_modules(
             "algorithm": "多策略博弈评估",
             "description": "把日级调度任务视为序列决策博弈，对比学习策略与搜索型对手策略的差异。",
             "avg_reward": round(float(game_summary[0]["q_learning_avg_reward"]), 2),
-            "incident_rate": round(float(q_summary["incident_rate"]), 4),
+            "incident_rate": round(float(game_summary[0]["q_learning_incident_rate"]), 4),
         },
         {
             "module": "Q学习调度策略",
@@ -932,12 +958,15 @@ class DQNAgent:
         self.total_reward_sum = 0.0
         self.total_reward_count = 0
 
-    def select_action(self, state: tuple[int, int, int, int, int], epsilon: float = 0.0) -> int:
-        """ε-贪心动作选择"""
+    def select_action(self, state, epsilon: float = 0.0) -> int:
+        """ε-贪心动作选择 (支持连续 np.ndarray 或旧离散 tuple)"""
         if np.random.random() < epsilon:
             return np.random.randint(0, len(ACTIONS))
 
-        state_vec = _state_to_onehot(state, self.num_sites)
+        if isinstance(state, np.ndarray):
+            state_vec = state.astype(np.float32)
+        else:
+            state_vec = _state_to_onehot(state, self.num_sites)
         state_tensor = torch.from_numpy(state_vec).unsqueeze(0).to(self.device)
         with torch.no_grad():
             q_values = self.policy_net(state_tensor)
@@ -1095,7 +1124,7 @@ def train_dqn(
     site_ids = sorted(validation_frame["site_id"].unique().tolist())
     site_index = {site_id: idx for idx, site_id in enumerate(site_ids)}
     num_sites = len(site_ids)
-    input_dim = num_sites + 15  # one-hot 编码的总维度
+    input_dim = num_sites + 6  # 连续特征: site_onehot(5) + pred_ratio + risk + ramp + hour_sin + hour_cos + cap_norm
 
     all_episodes = _build_episode_payloads(validation_frame, site_index)
     train_episodes = _sample_training_payloads(all_episodes, TRAIN_EPISODE_LIMIT, seed=42)
@@ -1103,7 +1132,7 @@ def train_dqn(
     # ---- 初始化 DQN 智能体 ----
     device = get_device()
     agent = DQNAgent(input_dim=input_dim, num_sites=num_sites, device=device)
-    print(f"[DQN] 状态维度={input_dim}, episodes={len(train_episodes)}, epochs={DQN_EPOCHS}")
+    print(f"[DQN] 状态维度={input_dim}(连续) {len(train_episodes)}eps, epochs={DQN_EPOCHS}")
 
     # ---- TensorBoard ----
     if log_dir is None:
@@ -1138,14 +1167,14 @@ def train_dqn(
 
         for ep in eval_episodes:
             ep_reward = 0.0
-            for idx, state in enumerate(ep["states"]):
-                action_idx = agent.select_action(state, epsilon=0.0)
+            for idx in range(len(ep["states"])):
+                dqn_state = ep["dqn_states"][idx]
+                action_idx = agent.select_action(dqn_state, epsilon=0.0)
                 ep_reward += float(ep["reward_matrix"][idx, action_idx])
                 action_counts[action_idx] += 1
 
                 # 记录 Q 值 (用于监测是否发散)
-                state_vec = _state_to_onehot(state, num_sites)
-                state_tensor = torch.from_numpy(state_vec).unsqueeze(0).to(device)
+                state_tensor = torch.from_numpy(dqn_state.astype(np.float32)).unsqueeze(0).to(device)
                 with torch.no_grad():
                     q_vals = agent.policy_net(state_tensor)
                 for a_idx in range(len(ACTIONS)):
@@ -1183,20 +1212,22 @@ def train_dqn(
         epoch_rewards = []
 
         for episode in shuffled:
-            states = episode["states"]
+            dqn_states_ep = episode["dqn_states"]
             reward_matrix = episode["reward_matrix"]
 
-            for idx, state in enumerate(states):
+            for idx in range(len(dqn_states_ep)):
+                dqn_state = dqn_states_ep[idx]
                 # ε-贪心选择动作
-                action_idx = agent.select_action(state, epsilon)
+                action_idx = agent.select_action(dqn_state, epsilon)
                 reward = float(reward_matrix[idx, action_idx])
-                done = (idx == len(states) - 1)
-                next_state = (0, 0, 0, 0, 0) if done else states[idx + 1]
+                done = (idx == len(dqn_states_ep) - 1)
+                next_dqn_state = np.zeros_like(dqn_state) if done else dqn_states_ep[idx + 1]
 
-                # 存入经验回放
-                state_vec = _state_to_onehot(state, num_sites)
-                next_state_vec = _state_to_onehot(next_state, num_sites)
-                agent.replay_buffer.push(state_vec, action_idx, reward, next_state_vec, done)
+                # 存入经验回放 (直接存连续向量)
+                agent.replay_buffer.push(
+                    dqn_state.astype(np.float32), action_idx, reward,
+                    next_dqn_state.astype(np.float32), done
+                )
                 agent.track_reward(reward)
                 epoch_rewards.append(reward)
 
@@ -1212,9 +1243,10 @@ def train_dqn(
                     if result is not None:
                         epoch_losses.append(result["loss"])
                         epoch_q_means.append(result["q_mean"])
-                        # TensorBoard: 每步记录
-                        writer.add_scalar("DQN/Loss", result["loss"], global_step)
-                        writer.add_scalar("DQN/Q_Mean", result["q_mean"], global_step)
+                        # TensorBoard: 每50步记录一次, 避免event文件过大导致加载缓慢
+                        if global_step % 50 == 0:
+                            writer.add_scalar("DQN/Loss", result["loss"], global_step)
+                            writer.add_scalar("DQN/Q_Mean", result["q_mean"], global_step)
 
                 global_step += 1
 
@@ -1466,9 +1498,19 @@ def pick_action(
     state = _state_from_row(row, site_index)
 
     if dqn_agent is not None:
-        # DQN 推理
+        # DQN 推理 (构建连续状态向量)
         try:
-            action_idx = dqn_agent.select_action(state, epsilon=0.0)
+            hour_val = row["timestamp"].hour
+            ramp_val = float(row.get("wind_ramp_abs", 0.0))
+            dqn_vec = np.zeros(len(site_index) + 6, dtype=np.float32)
+            dqn_vec[site_index[row["site_id"]]] = 1.0
+            dqn_vec[len(site_index)] = float(row["predicted_ratio"])
+            dqn_vec[len(site_index) + 1] = float(row["risk_score"])
+            dqn_vec[len(site_index) + 2] = ramp_val
+            dqn_vec[len(site_index) + 3] = np.sin(2.0 * np.pi * hour_val / 24.0)
+            dqn_vec[len(site_index) + 4] = np.cos(2.0 * np.pi * hour_val / 24.0)
+            dqn_vec[len(site_index) + 5] = float(row["capacity_mw"]) / 100.0
+            action_idx = dqn_agent.select_action(dqn_vec, epsilon=0.0)
         except Exception:
             action_idx = None
     else:

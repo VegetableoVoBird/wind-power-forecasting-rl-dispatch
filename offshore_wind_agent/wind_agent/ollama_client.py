@@ -130,6 +130,11 @@ class OllamaAgentClient:
                 message=f"Ollama unavailable: {type(exc).__name__}",
             )
 
+    def refresh_status(self) -> OllamaStatus:
+        """重新检测 Ollama 服务状态 (用户手动触发重连或运行时恢复)"""
+        self.status = self._detect_status()
+        return self.status
+
     def generate_answer(self, question: str, context: dict[str, Any]) -> dict[str, Any] | None:
         """使用 Ollama LLM 生成问答回复
 
@@ -147,7 +152,10 @@ class OllamaAgentClient:
             如果服务不可用或生成失败, 返回 None
         """
         if not self.status.available or not self.status.model:
-            return None
+            # 自动重试: 初次检测可能因为 Ollama 未就绪而失败, 实际调用时再试一次
+            self.status = self._detect_status()
+            if not self.status.available or not self.status.model:
+                return None
 
         # System Prompt: 定义智能体的角色和能力边界
         system_prompt = (

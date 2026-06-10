@@ -577,6 +577,18 @@ class OffshoreWindAgentSystem:
                 actual_power = float(row["power_mw"])
                 capacity = float(row["capacity_mw"])
 
+                # 构建 DQN 连续状态向量
+                hour_val = row["timestamp"].hour
+                ramp_val = float(row.get("wind_ramp_abs", 0.0))
+                dqn_state = np.zeros(len(site_index) + 6, dtype=np.float32)
+                dqn_state[site_index[row["site_id"]]] = 1.0
+                dqn_state[len(site_index)] = pred_ratio
+                dqn_state[len(site_index) + 1] = risk_val
+                dqn_state[len(site_index) + 2] = ramp_val
+                dqn_state[len(site_index) + 3] = np.sin(2.0 * np.pi * hour_val / 24.0)
+                dqn_state[len(site_index) + 4] = np.cos(2.0 * np.pi * hour_val / 24.0)
+                dqn_state[len(site_index) + 5] = capacity / 100.0
+
                 # 根据策略类型选择动作
                 if strat["type"] == "q_learn":
                     values = np.array(q_table.get(state, []), dtype=float)
@@ -586,7 +598,7 @@ class OffshoreWindAgentSystem:
                         action_idx = _fallback_action(risk_val, pred_ratio)
                 elif strat["type"] == "dqn":
                     try:
-                        action_idx = dqn_agent.select_action(state, epsilon=0.0)
+                        action_idx = dqn_agent.select_action(dqn_state, epsilon=0.0)
                     except Exception:
                         action_idx = _fallback_action(risk_val, pred_ratio)
                 elif strat["type"] == "aggressive":
@@ -596,10 +608,14 @@ class OffshoreWindAgentSystem:
                 elif strat["type"] == "conservative":
                     action_idx = 2 if risk_val >= 0.45 else 1
                 elif strat["type"] == "heuristic":
-                    # 构建简单的 numpy 数组给 heuristic_action_for_state
-                    dummy_rewards = np.zeros(4)
-                    dummy_rewards[1] = pred_power * 0.96  # 平衡调度的近似收益
-                    action_idx = heuristic_action_for_state(risk_val, pred_ratio, float(dummy_rewards[1]), dummy_rewards)
+                    # 用各动作的 dispatch_factor 估算近似收益, 确保4个动作都有合理值
+                    approx = np.array([
+                        pred_power * 0.95,   # 积极并网 (×1.04, 有不稳定惩罚)
+                        pred_power * 0.92,   # 平衡调度 (×0.96, 基准)
+                        pred_power * 0.78,   # 保守预留 (×0.86)
+                        pred_power * 0.65,   # 风险巡检 (×0.78)
+                    ])
+                    action_idx = heuristic_action_for_state(risk_val, pred_ratio, float(approx[1]), approx)
                 else:
                     action_idx = _fallback_action(risk_val, pred_ratio)
 
@@ -1122,6 +1138,15 @@ class OffshoreWindAgentSystem:
     # ========================================================================
     # 智能问答
     # ========================================================================
+
+    def refresh_ollama(self) -> dict[str, Any]:
+        """重新检测 Ollama 连接状态, 返回当前状态"""
+        status = self.ollama.refresh_status()
+        return {
+            "available": status.available,
+            "model": status.model,
+            "message": status.message,
+        }
 
     def answer_question(self, question: str) -> dict[str, Any]:
         """智能问答接口

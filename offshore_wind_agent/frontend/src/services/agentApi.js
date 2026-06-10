@@ -35,6 +35,10 @@ export function askAgent(question) {
   })
 }
 
+export function refreshAgent() {
+  return readJson('/agent/refresh', { method: 'POST' })
+}
+
 export function fetchComparison() {
   return readJson('/comparison')
 }
