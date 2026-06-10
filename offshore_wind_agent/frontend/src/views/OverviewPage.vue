@@ -131,7 +131,7 @@ onMounted(async () => {
 
     <!-- 风险说明 (简化清晰版) -->
     <section class="dual-grid">
-      <article class="page-panel">
+      <article class="page-panel flex-col">
         <div class="panel-head">
           <div>
             <p class="eyebrow">风险监控</p>
