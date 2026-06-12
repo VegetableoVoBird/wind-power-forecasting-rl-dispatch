@@ -10,6 +10,11 @@
 - **风险评分**：6 维加权风险评估（风速突变、降水、高风速、密度异常、云量、历史误差）
 - **调度决策**：4 种动作（积极并网 / 平衡调度 / 保守预留 / 风险巡检），通过 Q-Learning、DQN、遗传算法、启发式搜索对比寻优
 
+## 数据集
+- 数据来源
+
+![img.png](images/img.png)
+
 ## 系统架构
 
 ```
@@ -40,8 +45,7 @@
 offshore_wind_agent/
 ├── app.py                    # Flask API 入口 (端口 5000)
 ├── train_system.py           # 训练入口脚本
-├── eval_model.py             # 模型精度评估实验 (v1)
-├── eval_model_v2.py          # 模型精度评估实验 (v2, 增加滞后特征 + XGBoost)
+├── eval_model.py             # 模型精度评估实验
 ├── requirements.txt          # Python 依赖
 │
 ├── wind_agent/               # 核心 Python 包
@@ -95,7 +99,7 @@ offshore_wind_agent/
 
 - Python ≥ 3.13
 - Node.js ≥ 18
-- (可选) NVIDIA GPU + CUDA 12.1/11.8 用于 DQN 训练加速
+- (可选) NVIDIA GPU + CUDA 用于 DQN 训练加速
 - (可选) [Ollama](https://ollama.com/) 用于智能问答
 
 ### 1. 安装 Python 依赖
